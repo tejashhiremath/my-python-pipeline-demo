@@ -1,0 +1,2 @@
+# requirements.txt
+# (empty for this demo, or add 'pytest' if you want to add tests later)
