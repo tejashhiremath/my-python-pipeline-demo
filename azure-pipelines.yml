@@ -1,46 +1,72 @@
+# azure-pipelines.yml
 trigger:
-- main
+- main # Trigger pipeline on pushes to the main branch
 
-pool:
-  vmImage: ubuntu-latest
+variables:
+  pythonVersion: '3.9' # Define Python version to use
 
-strategy:
-  matrix:
-    Python38:
-      python.version: '3.8'
-    Python39:
-      python.version: '3.9'
-    Python310:
-      python.version: '3.10'
-    Python311:
-      python.version: '3.11'
+stages:
+- stage: Build_And_Test_Microsoft_Hosted
+  displayName: 'Build & Test (Microsoft-Hosted)'
+  jobs:
+  - job: MicrosoftHostedJob
+    displayName: 'Run on Microsoft-Hosted Agent'
+    pool:
+      vmImage: 'ubuntu-latest' # Using a Microsoft-hosted Ubuntu agent
+    steps:
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: '$(pythonVersion)'
+      displayName: 'Use Python $(pythonVersion)'
 
-steps:
-- task: UsePythonVersion@0
-  inputs:
-    versionSpec: '$(python.version)'
-  displayName: 'Use Python $(python.version)'
+    - script: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+      displayName: 'Install dependencies'
 
-- script: |
-    python -m pip install --upgrade pip
-    pip install -r requirements.txt
-  displayName: 'Install dependencies'
+    - script: |
+        pip install pytest
+        pytest tests/
+      displayName: 'Run unit tests with Pytest'
 
-- script: |
-    pip install pytest pytest-cov pytest-azurepipelines
-    pytest --junitxml=test-results.xml --cov=. --cov-report=xml || \
-      if [ $$? -eq 5 ]; then echo "No tests found. Failing build."; exit 1; fi
-  displayName: 'Run pytest with coverage and test reporting'
+    # Mend Bolt Security Scan (runs after dependencies are installed)
+    # Ensure Mend Bolt extension is installed in your Azure DevOps Org.
+    - task: WhiteSource Bolt@21 # Or the latest version number for Mend Bolt
+      displayName: 'Run Mend Bolt Security Scan'
+      inputs:
+        cwd: '$(System.DefaultWorkingDirectory)' # Scan the root of the checkout
 
-- task: PublishTestResults@2
-  inputs:
-    testResultsFiles: 'test-results.xml'
-    testRunTitle: 'Python $(python.version) Test Results'
-  condition: succeededOrFailed()
+- stage: Build_And_Test_Self_Hosted
+  displayName: 'Build & Test (Self-Hosted)'
+  dependsOn: Build_And_Test_Microsoft_Hosted # Ensure this runs after the MS-hosted stage
+  condition: succeeded() # Only run if the previous stage succeeded
+  jobs:
+  - job: SelfHostedJob
+    displayName: 'Run on Self-Hosted Agent'
+    pool:
+      name: 'MyLocalAgents' # Name of your self-hosted agent pool
+      demands: [] # Add demands if needed, e.g., specific capabilities
+    steps:
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: '$(pythonVersion)'
+        addToPath: true # Ensure Python is on PATH for subsequent scripts
+      displayName: 'Use Python $(pythonVersion) (Self-Hosted)'
+      condition: succeeded() # Only run if agent found
 
-- task: PublishCodeCoverageResults@1
-  inputs:
-    codeCoverageTool: 'Cobertura'
-    summaryFileLocation: 'coverage.xml'
-    reportDirectory: '.'
-  condition: succeededOrFailed()
+    - script: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+      displayName: 'Install dependencies (Self-Hosted)'
+
+    - script: |
+        pip install pytest
+        pytest tests/
+      displayName: 'Run unit tests with Pytest (Self-Hosted)'
+      
+    # You can also run Mend Bolt here if you want to test its behavior
+    # on a self-hosted agent, though it's typically run once per build.
+    # - task: WhiteSource Bolt@21
+    #   displayName: 'Run Mend Bolt Security Scan (Self-Hosted)'
+    #   inputs:
+    #     cwd: '$(System.DefaultWorkingDirectory)'
