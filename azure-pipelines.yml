@@ -1,23 +1,75 @@
 # azure-pipelines.yml
 trigger:
-- main # Trigger pipeline on pushes to the main branch
+- main
 
-variables:
-  pythonVersion: '3.9' # Define Python version to use
+# Global variables can be defined here if needed across stages
+# variables:
+#   exampleGlobalVar: 'someValue'
 
 stages:
-- stage: Build_And_Test_Microsoft_Hosted
-  displayName: 'Build & Test (Microsoft-Hosted)'
+- stage: PythonMatrixTests
+  displayName: 'Run Python Matrix Tests (Microsoft-Hosted)'
   jobs:
-  - job: MicrosoftHostedJob
-    displayName: 'Run on Microsoft-Hosted Agent'
+  - job: MatrixTestJob
+    displayName: 'Test with Python $(python.version)'
     pool:
-      vmImage: 'ubuntu-latest' # Using a Microsoft-hosted Ubuntu agent
+      vmImage: ubuntu-latest # This was global, now specific to this job
+    strategy:
+      matrix:
+        Python38:
+          python.version: '3.8'
+        Python39:
+          python.version: '3.9'
+        Python310:
+          python.version: '3.10'
+        Python311:
+          python.version: '3.11'
     steps:
     - task: UsePythonVersion@0
       inputs:
-        versionSpec: '$(pythonVersion)'
-      displayName: 'Use Python $(pythonVersion)'
+        versionSpec: '$(python.version)'
+      displayName: 'Use Python $(python.version)'
+
+    - script: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+      displayName: 'Install dependencies'
+
+    - script: |
+        pip install pytest pytest-cov pytest-azurepipelines
+        pytest --junitxml=test-results.xml --cov=. --cov-report=xml || \
+          if [ $$? -eq 5 ]; then echo "No tests found in matrix. Failing build."; exit 1; fi
+      displayName: 'Run pytest with coverage and test reporting'
+
+    - task: PublishTestResults@2
+      inputs:
+        testResultsFiles: 'test-results.xml'
+        testRunTitle: 'Python $(python.version) Test Results'
+      condition: succeededOrFailed() # Run even if tests fail to publish results
+
+    - task: PublishCodeCoverageResults@1
+      inputs:
+        codeCoverageTool: 'Cobertura'
+        summaryFileLocation: 'coverage.xml' # pytest-cov generates coverage.xml
+        # reportDirectory: '.' # summaryFileLocation is usually sufficient
+      condition: succeededOrFailed() # Run even if tests fail to publish coverage
+
+- stage: SecurityScan_And_TargetedBuild
+  displayName: 'Security Scan & Targeted Build (Microsoft-Hosted)'
+  dependsOn: PythonMatrixTests # Ensure matrix tests complete first
+  condition: succeeded()       # Only run if matrix tests passed
+  variables:
+    pythonVersionForScan: '3.9' # Define Python version for this stage
+  jobs:
+  - job: MicrosoftHostedJobWithScan
+    displayName: 'Build, Test & Scan (Python $(pythonVersionForScan))'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: '$(pythonVersionForScan)'
+      displayName: 'Use Python $(pythonVersionForScan)'
 
     - script: |
         python -m pip install --upgrade pip
@@ -26,33 +78,34 @@ stages:
 
     - script: |
         pip install pytest
-        pytest tests/
+        pytest tests/ # Assuming 'tests/' is your test directory for this specific run
       displayName: 'Run unit tests with Pytest'
 
-    # Mend Bolt Security Scan (runs after dependencies are installed)
-    # Ensure Mend Bolt extension is installed in your Azure DevOps Org.
-    - task: WhiteSource Bolt@21 # Or the latest version number for Mend Bolt
+    # Mend Bolt Security Scan
+    # Ensure Mend Bolt extension (formerly WhiteSource Bolt) is installed.
+    - task: MendBolt@21 # Adjusted task name and version
       displayName: 'Run Mend Bolt Security Scan'
       inputs:
         cwd: '$(System.DefaultWorkingDirectory)' # Scan the root of the checkout
 
 - stage: Build_And_Test_Self_Hosted
   displayName: 'Build & Test (Self-Hosted)'
-  dependsOn: Build_And_Test_Microsoft_Hosted # Ensure this runs after the MS-hosted stage
-  condition: succeeded() # Only run if the previous stage succeeded
+  dependsOn: SecurityScan_And_TargetedBuild # Or PythonMatrixTests if it can run in parallel or independently
+  condition: succeeded()
+  variables:
+    pythonVersionForSelfHost: '3.9' # Define Python version for this stage
   jobs:
   - job: SelfHostedJob
-    displayName: 'Run on Self-Hosted Agent'
+    displayName: 'Run on Self-Hosted Agent (Python $(pythonVersionForSelfHost))'
     pool:
       name: 'MyLocalAgents' # Name of your self-hosted agent pool
-      demands: [] # Add demands if needed, e.g., specific capabilities
+      # demands: [] # Add demands if needed, e.g., specific capabilities
     steps:
     - task: UsePythonVersion@0
       inputs:
-        versionSpec: '$(pythonVersion)'
-        addToPath: true # Ensure Python is on PATH for subsequent scripts
-      displayName: 'Use Python $(pythonVersion) (Self-Hosted)'
-      condition: succeeded() # Only run if agent found
+        versionSpec: '$(pythonVersionForSelfHost)'
+        # addToPath: true # addToPath is true by default for UsePythonVersion
+      displayName: 'Use Python $(pythonVersionForSelfHost)'
 
     - script: |
         python -m pip install --upgrade pip
@@ -63,10 +116,3 @@ stages:
         pip install pytest
         pytest tests/
       displayName: 'Run unit tests with Pytest (Self-Hosted)'
-      
-    # You can also run Mend Bolt here if you want to test its behavior
-    # on a self-hosted agent, though it's typically run once per build.
-    # - task: WhiteSource Bolt@21
-    #   displayName: 'Run Mend Bolt Security Scan (Self-Hosted)'
-    #   inputs:
-    #     cwd: '$(System.DefaultWorkingDirectory)'
